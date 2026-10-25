@@ -22,7 +22,10 @@ import { useExpenses } from "@/lib/useExpenses";
 type Period = "day" | "week" | "month";
 
 export default function Home() {
-  const { expenses, currency, setCurrency, addMany, update, remove, importAll, loaded } = useExpenses();
+  const {
+    expenses, currency, setCurrency, addMany, update, remove, importAll, reload,
+    loaded, loadError, authEnabled, legacyCount, migrateLegacy, dismissLegacy,
+  } = useExpenses();
   const [period, setPeriod] = useState<Period>("day");
   const [anchor, setAnchor] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -30,6 +33,16 @@ export default function Home() {
 
   if (!loaded) {
     return <main className="mx-auto max-w-4xl px-4 py-10 text-ink-3">Loading…</main>;
+  }
+  if (loadError) {
+    return (
+      <main className="mx-auto max-w-4xl px-4 py-10">
+        <p className="rounded-lg bg-warn-bg px-3 py-2 text-sm text-warn-ink">Couldn&apos;t reach the database: {loadError}</p>
+        <button type="button" onClick={reload} className="mt-3 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-ink">
+          Retry
+        </button>
+      </main>
+    );
   }
 
   const today = toISODate(new Date());
@@ -76,6 +89,17 @@ export default function Home() {
     setTimeout(() => setToast(null), 3000);
   }
 
+  /** Runs a save/delete and reports failures instead of losing them silently. */
+  async function attempt(action: () => Promise<unknown>, success?: string) {
+    try {
+      await action();
+      if (success) flash(success);
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "Something went wrong.");
+      throw e;
+    }
+  }
+
   function exportData() {
     const blob = new Blob([JSON.stringify({ currency, expenses }, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -92,11 +116,11 @@ export default function Home() {
       const rows = Array.isArray(data) ? data : data.expenses;
       if (!Array.isArray(rows)) throw new Error();
       if (!confirm(`Replace your ${expenses.length} saved expenses with the ones in "${file.name}"?`)) return;
-      const kept = importAll(rows);
-      if (data.currency in CURRENCIES) setCurrency(data.currency);
+      const kept = await importAll(rows);
+      if (data.currency in CURRENCIES) await setCurrency(data.currency);
       flash(`Imported ${kept} expenses.`);
-    } catch {
-      flash("That file isn't a valid export.");
+    } catch (e) {
+      flash(e instanceof SyntaxError || !(e instanceof Error) ? "That file isn't a valid export." : e.message);
     }
   }
 
@@ -110,7 +134,7 @@ export default function Home() {
         <select
           aria-label="Currency"
           value={currency}
-          onChange={(e) => setCurrency(e.target.value as CurrencyCode)}
+          onChange={(e) => attempt(() => setCurrency(e.target.value as CurrencyCode)).catch(() => {})}
           className="rounded-lg border border-border bg-surface px-2 py-1.5 text-sm"
         >
           {Object.entries(CURRENCIES).map(([code, { symbol }]) => (
@@ -121,12 +145,31 @@ export default function Home() {
         </select>
       </header>
 
+      {legacyCount > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-sm">
+          <span className="text-ink-2">
+            {legacyCount} {legacyCount === 1 ? "expense is" : "expenses are"} saved only in this browser.
+          </span>
+          <button
+            type="button"
+            onClick={() =>
+              attempt(async () => flash(`Moved ${await migrateLegacy()} expenses to the database.`)).catch(() => {})
+            }
+            className="ml-auto rounded-lg bg-accent px-3 py-1.5 font-medium text-accent-ink"
+          >
+            Move to database
+          </button>
+          <button type="button" onClick={dismissLegacy} className="rounded-lg px-3 py-1.5 text-ink-2 hover:bg-surface-2">
+            Discard
+          </button>
+        </div>
+      )}
+
       <EntryPanel
         currency={currency}
-        onSave={(items) => {
-          addMany(items);
-          flash(`Saved ${items.length} ${items.length === 1 ? "expense" : "expenses"}.`);
-        }}
+        onSave={(items) =>
+          attempt(() => addMany(items), `Saved ${items.length} ${items.length === 1 ? "expense" : "expenses"}.`)
+        }
       />
 
       <section className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -219,13 +262,18 @@ export default function Home() {
           </div>
           <div>
             <h3 className="mb-3 text-sm font-semibold text-ink-2">Expenses</h3>
-            <ExpenseList expenses={periodExpenses} currency={currency} onUpdate={update} onRemove={remove} />
+            <ExpenseList
+              expenses={periodExpenses}
+              currency={currency}
+              onUpdate={(id, patch) => attempt(() => update(id, patch))}
+              onRemove={(id) => attempt(() => remove(id), "Deleted.")}
+            />
           </div>
         </div>
       </section>
 
       <footer className="mt-6 flex flex-wrap items-center gap-3 text-sm text-ink-3">
-        <span>{expenses.length} expenses saved in this browser.</span>
+        <span>{expenses.length} expenses saved.</span>
         <button type="button" onClick={exportData} className="underline-offset-2 hover:text-ink hover:underline">
           Export JSON
         </button>
@@ -243,6 +291,18 @@ export default function Home() {
             e.target.value = "";
           }}
         />
+        {authEnabled && (
+          <button
+            type="button"
+            onClick={async () => {
+              await fetch("/api/logout", { method: "POST" });
+              window.location.href = "/login";
+            }}
+            className="ml-auto underline-offset-2 hover:text-ink hover:underline"
+          >
+            Sign out
+          </button>
+        )}
       </footer>
 
       {toast && (

@@ -11,7 +11,8 @@ const EXAMPLE =
 
 interface Props {
   currency: CurrencyCode;
-  onSave: (items: ParsedItem[]) => void;
+  /** Resolves once stored; rejects (and keeps the drafts) if saving failed. */
+  onSave: (items: ParsedItem[]) => Promise<void>;
 }
 
 interface DraftItem extends ParsedItem {
@@ -27,6 +28,7 @@ export function EntryPanel({ currency, onSave }: Props) {
   const [drafts, setDrafts] = useState<DraftItem[] | null>(null);
   const [engine, setEngine] = useState<ParseResponse["engine"] | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
 
   async function handleParse() {
     if (!text.trim() || loading) return;
@@ -76,17 +78,24 @@ export function EntryPanel({ currency, onSave }: Props) {
   const invalid = validDrafts.some((d) => !(d.amountMinor > 0) || !d.date);
   const draftTotal = sumMinor(validDrafts.filter((d) => d.amountMinor > 0).map((d) => d.amountMinor));
 
-  function handleSave() {
-    if (!drafts || invalid || validDrafts.length === 0) return;
-    onSave(
-      validDrafts.map(({ description, category, amountMinor, date, sourceText }) => ({
-        description: description.trim() || "Expense",
-        category,
-        amountMinor,
-        date,
-        sourceText,
-      })),
-    );
+  async function handleSave() {
+    if (!drafts || invalid || validDrafts.length === 0 || saving) return;
+    setSaving(true);
+    try {
+      await onSave(
+        validDrafts.map(({ description, category, amountMinor, date, sourceText }) => ({
+          description: description.trim() || "Expense",
+          category,
+          amountMinor,
+          date,
+          sourceText,
+        })),
+      );
+    } catch {
+      return; // The caller already showed the error; keep the drafts so nothing is lost.
+    } finally {
+      setSaving(false);
+    }
     setDrafts(null);
     setWarnings([]);
     setEngine(null);
@@ -236,10 +245,10 @@ export function EntryPanel({ currency, onSave }: Props) {
             <button
               type="button"
               onClick={handleSave}
-              disabled={invalid || validDrafts.length === 0}
+              disabled={invalid || validDrafts.length === 0 || saving}
               className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-ink disabled:opacity-50"
             >
-              Save {validDrafts.length || ""} {validDrafts.length === 1 ? "expense" : "expenses"}
+              {saving ? "Saving…" : `Save ${validDrafts.length || ""} ${validDrafts.length === 1 ? "expense" : "expenses"}`}
             </button>
           </div>
         </div>

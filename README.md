@@ -23,7 +23,19 @@ npm run dev                  # http://localhost:3000
 
 Without a key the app uses the rule parser only (offline, free). If an AI request fails, it falls back to the rule parser automatically and tells you.
 
-Data is kept in your browser's localStorage. Use **Export JSON** / **Import JSON** at the bottom of the page to back it up or move it to another device.
+## Storage
+
+Expenses are stored in a database (SQLite via [libSQL](https://github.com/tursodatabase/libsql)), so they survive browser resets and show up on every device that opens the app.
+
+- **Locally** nothing to set up: data goes into `expenses.db` in the project folder (git-ignored). Back that file up, or use **Export JSON**.
+- **Hosted (e.g. Vercel)** serverless hosts have no lasting disk, so use a hosted libSQL database. Create a free one at [turso.tech](https://turso.tech) (`turso db create expenses`, then `turso db show --url expenses` and `turso db tokens create expenses`) and set `DATABASE_URL` and `DATABASE_AUTH_TOKEN`.
+- **Self-hosted on a VPS** the default SQLite file works; just keep it on a persistent disk.
+
+The tables are created automatically on first run. If you used an earlier version that saved to the browser, the app offers a one-click **Move to database**.
+
+### Password
+
+Set `APP_PASSWORD` to require a login (do this before putting the app on the internet: otherwise anyone with the URL can read your expenses and use your API key). Sessions last 30 days; changing the password signs everyone out.
 
 ## Periods
 
@@ -48,5 +60,8 @@ Click a bar to jump to that day; click a summary tile to jump to that period.
 - `src/lib/aiParser.ts` — Claude structured-output extraction
 - `src/app/api/parse/route.ts` — runs both, cross-checks, falls back
 - `src/lib/money.ts`, `src/lib/dates.ts`, `src/lib/summary.ts` — exact money math, calendar math, aggregation
-- `src/lib/useExpenses.ts` — localStorage persistence
+- `src/lib/db.ts` — database schema and queries
+- `src/app/api/expenses/` — save, edit, delete, import
+- `src/lib/auth.ts`, `src/middleware.ts` — optional password login
+- `src/lib/useExpenses.ts` — client data hook
 - `src/components/` — entry/review panel, charts, expense list

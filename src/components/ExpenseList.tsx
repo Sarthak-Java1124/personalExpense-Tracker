@@ -10,8 +10,8 @@ import type { Expense } from "@/lib/types";
 interface Props {
   expenses: Expense[];
   currency: CurrencyCode;
-  onUpdate: (id: string, patch: Partial<Omit<Expense, "id">>) => void;
-  onRemove: (id: string) => void;
+  onUpdate: (id: string, patch: Partial<Omit<Expense, "id">>) => Promise<void>;
+  onRemove: (id: string) => Promise<void>;
 }
 
 /** Expenses grouped by day (newest first), each editable in place. */
@@ -57,7 +57,7 @@ export function ExpenseList({ expenses, currency, onUpdate, onRemove }: Props) {
                     type="button"
                     aria-label={`Delete ${e.description}`}
                     onClick={() => {
-                      if (confirm(`Delete "${e.description}" (${formatMoney(e.amountMinor, currency)})?`)) onRemove(e.id);
+                      if (confirm(`Delete "${e.description}" (${formatMoney(e.amountMinor, currency)})?`)) onRemove(e.id).catch(() => {});
                     }}
                     className="rounded px-1.5 text-xs text-ink-3 hover:bg-surface-2 hover:text-danger"
                   >
@@ -87,6 +87,7 @@ function EditRow({
   const [category, setCategory] = useState<Category>(expense.category);
   const [date, setDate] = useState(expense.date);
   const amountMinor = toMinor(Number(amount));
+  const [saving, setSaving] = useState(false);
   const valid = amountMinor > 0 && Boolean(date);
 
   return (
@@ -120,10 +121,15 @@ function EditRow({
       <div className="flex gap-1">
         <button
           type="button"
-          disabled={!valid}
-          onClick={() => {
-            onUpdate(expense.id, { description: description.trim() || "Expense", amountMinor, category, date });
-            onDone();
+          disabled={!valid || saving}
+          onClick={async () => {
+            setSaving(true);
+            try {
+              await onUpdate(expense.id, { description: description.trim() || "Expense", amountMinor, category, date });
+              onDone();
+            } catch {
+              setSaving(false); // Error already shown; stay in edit mode.
+            }
           }}
           className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-accent-ink disabled:opacity-50"
         >

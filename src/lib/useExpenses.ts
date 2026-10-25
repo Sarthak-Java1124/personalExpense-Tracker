@@ -1,90 +1,127 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { isCategory } from "./categories";
-import { isISODate } from "./dates";
 import { CURRENCIES, type CurrencyCode } from "./money";
 import type { Expense, ParsedItem } from "./types";
+import { isExpense } from "./validate";
 
-const EXPENSES_KEY = "expense-tracker:expenses:v1";
-const CURRENCY_KEY = "expense-tracker:currency:v1";
+/** Where older versions of the app kept data, before the database existed. */
+const LEGACY_EXPENSES_KEY = "expense-tracker:expenses:v1";
 
-function isExpense(value: unknown): value is Expense {
-  const e = value as Expense;
-  return (
-    typeof e === "object" && e !== null &&
-    typeof e.id === "string" &&
-    typeof e.description === "string" &&
-    typeof e.amountMinor === "number" && Number.isInteger(e.amountMinor) && e.amountMinor > 0 &&
-    typeof e.date === "string" && isISODate(e.date) &&
-    typeof e.category === "string" && isCategory(e.category)
-  );
-}
-
-function readStorage<T>(key: string): T | null {
+function readLegacy(): Expense[] {
   try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : null;
+    const raw = localStorage.getItem(LEGACY_EXPENSES_KEY);
+    const rows = raw ? JSON.parse(raw) : [];
+    return Array.isArray(rows) ? rows.filter(isExpense) : [];
   } catch {
-    return null;
+    return [];
   }
 }
 
-function writeStorage(key: string, value: unknown) {
+function clearLegacy() {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    localStorage.removeItem(LEGACY_EXPENSES_KEY);
   } catch {
-    // Storage full or blocked; the in-memory state still works for this session.
+    // Storage blocked; nothing to clear.
   }
 }
 
-function newId(): string {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+async function api<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, {
+    ...init,
+    headers: init?.body ? { "Content-Type": "application/json" } : undefined,
+  });
+  if (res.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Not signed in.");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status}).`);
+  return data as T;
 }
 
 export function useExpenses() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [currency, setCurrencyState] = useState<CurrencyCode>("INR");
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [legacy, setLegacy] = useState<Expense[]>([]);
 
-  useEffect(() => {
-    const stored = readStorage<unknown[]>(EXPENSES_KEY);
-    if (Array.isArray(stored)) setExpenses(stored.filter(isExpense));
-    const cur = readStorage<string>(CURRENCY_KEY);
-    if (cur && cur in CURRENCIES) setCurrencyState(cur as CurrencyCode);
-    setLoaded(true);
+  const reload = useCallback(async () => {
+    try {
+      const data = await api<{ expenses: Expense[]; currency: string | null; authEnabled: boolean }>("/api/expenses");
+      setExpenses(data.expenses);
+      if (data.currency && data.currency in CURRENCIES) setCurrencyState(data.currency as CurrencyCode);
+      setAuthEnabled(data.authEnabled);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Couldn't load your expenses.");
+    } finally {
+      setLoaded(true);
+    }
   }, []);
 
   useEffect(() => {
-    if (loaded) writeStorage(EXPENSES_KEY, expenses);
-  }, [expenses, loaded]);
+    setLegacy(readLegacy());
+    reload();
+  }, [reload]);
 
-  const setCurrency = useCallback((c: CurrencyCode) => {
+  const setCurrency = useCallback(async (c: CurrencyCode) => {
     setCurrencyState(c);
-    writeStorage(CURRENCY_KEY, c);
+    await api("/api/settings", { method: "PUT", body: JSON.stringify({ currency: c }) });
   }, []);
 
-  const addMany = useCallback((items: ParsedItem[]) => {
-    const now = new Date().toISOString();
-    setExpenses((prev) => [...prev, ...items.map((i) => ({ ...i, id: newId(), createdAt: now }))]);
+  const addMany = useCallback(async (items: ParsedItem[]) => {
+    const data = await api<{ expenses: Expense[] }>("/api/expenses", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    });
+    setExpenses((prev) => [...prev, ...data.expenses]);
   }, []);
 
-  const update = useCallback((id: string, patch: Partial<Omit<Expense, "id">>) => {
-    setExpenses((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+  const update = useCallback(async (id: string, patch: Partial<ParsedItem>) => {
+    const data = await api<{ expense: Expense }>(`/api/expenses/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+    setExpenses((prev) => prev.map((e) => (e.id === id ? data.expense : e)));
   }, []);
 
-  const remove = useCallback((id: string) => {
+  const remove = useCallback(async (id: string) => {
+    await api(`/api/expenses/${encodeURIComponent(id)}`, { method: "DELETE" });
     setExpenses((prev) => prev.filter((e) => e.id !== id));
   }, []);
 
-  /** Replaces all data with an imported list; returns how many valid rows were kept. */
-  const importAll = useCallback((rows: unknown[]): number => {
-    const valid = rows.filter(isExpense);
-    setExpenses(valid);
-    return valid.length;
+  /** Replaces all stored expenses with an imported list; returns how many valid rows were kept. */
+  const importAll = useCallback(async (rows: unknown[]): Promise<number> => {
+    const data = await api<{ added: number; expenses: Expense[] }>("/api/expenses", {
+      method: "PUT",
+      body: JSON.stringify({ expenses: rows, mode: "replace" }),
+    });
+    setExpenses(data.expenses);
+    return data.added;
   }, []);
 
-  return { expenses, currency, setCurrency, addMany, update, remove, importAll, loaded };
+  /** Moves expenses saved only in this browser into the database. */
+  const migrateLegacy = useCallback(async (): Promise<number> => {
+    const data = await api<{ added: number; expenses: Expense[] }>("/api/expenses", {
+      method: "PUT",
+      body: JSON.stringify({ expenses: legacy, mode: "merge" }),
+    });
+    setExpenses(data.expenses);
+    clearLegacy();
+    setLegacy([]);
+    return data.added;
+  }, [legacy]);
+
+  const dismissLegacy = useCallback(() => {
+    clearLegacy();
+    setLegacy([]);
+  }, []);
+
+  return {
+    expenses, currency, setCurrency, addMany, update, remove, importAll, reload,
+    loaded, loadError, authEnabled, legacyCount: legacy.length, migrateLegacy, dismissLegacy,
+  };
 }
